@@ -1,3 +1,4 @@
+import { DropdownList } from "@/components/DropdownList";
 import { EditIcon, PlusIcon, TrashIcon } from "@/components/icons";
 import { StripeLogo } from "@/components/logos/StripeLogo";
 import { WhatsAppLogo } from "@/components/logos/WhatsAppLogo";
@@ -29,6 +30,7 @@ import {
   Text,
   type TextProps,
 } from "@chakra-ui/react";
+import { useTranslate } from "@tolgee/react";
 import { IntegrationBlockType } from "@typebot.io/blocks-integrations/constants";
 import {
   type Credentials,
@@ -44,7 +46,11 @@ const nonEditableTypes = ["whatsApp", "google sheets"] as const;
 type CredentialsInfo = Pick<Credentials, "id" | "type" | "name">;
 
 export const CredentialsSettingsForm = () => {
+  const { t } = useTranslate();
   const [creatingType, setCreatingType] = useState<Credentials["type"]>();
+  const [selectedScope, setSelectedScope] = useState<"workspace" | "user">(
+    "workspace",
+  );
   const [editingCredentials, setEditingCredentials] = useState<{
     id: string;
     type: Credentials["type"];
@@ -53,11 +59,16 @@ export const CredentialsSettingsForm = () => {
   const { workspace } = useWorkspace();
   const { data, isLoading, refetch } =
     trpc.credentials.listCredentials.useQuery(
+      selectedScope === "workspace"
+        ? {
+            scope: "workspace",
+            workspaceId: workspace!.id,
+          }
+        : {
+            scope: "user",
+          },
       {
-        workspaceId: workspace!.id,
-      },
-      {
-        enabled: !!workspace?.id,
+        enabled: selectedScope === "user" || !!workspace?.id,
       },
     );
 
@@ -85,6 +96,7 @@ export const CredentialsSettingsForm = () => {
   return (
     <Stack spacing="6" w="full">
       <CredentialsCreateModal
+        scope={selectedScope}
         creatingType={creatingType}
         onSubmit={() => {
           refetch();
@@ -93,6 +105,7 @@ export const CredentialsSettingsForm = () => {
         onClose={() => setCreatingType(undefined)}
       />
       <CredentialsUpdateModal
+        scope={selectedScope}
         editingCredentials={editingCredentials}
         onSubmit={() => {
           refetch();
@@ -101,10 +114,23 @@ export const CredentialsSettingsForm = () => {
         onClose={() => setEditingCredentials(undefined)}
       />
       <HStack justifyContent="space-between">
-        <Heading fontSize="2xl">Credentials</Heading>
+        <HStack>
+          <Heading fontSize="2xl">{t("credentials")}</Heading>
+          <DropdownList
+            size="sm"
+            items={[
+              { label: "User", value: "user" },
+              { label: "Workspace", value: "workspace" },
+            ]}
+            currentItem={selectedScope}
+            onItemSelect={(value) =>
+              setSelectedScope(value as "user" | "workspace")
+            }
+          />
+        </HStack>
         <Menu isLazy>
           <MenuButton as={Button} size="sm" leftIcon={<PlusIcon />}>
-            Create new
+            {t("account.preferences.credentials.addButton.label")}
           </MenuButton>
           <MenuList>
             {credentialsTypes.map((type) => (
@@ -132,7 +158,7 @@ export const CredentialsSettingsForm = () => {
           >
             <HStack spacing="3">
               <CredentialsIcon type={type} boxSize="24px" />
-              <CredentialsLabel type={type} fontWeight="semibold" />
+              <CredentialsLabel type={type} fontWeight="medium" />
             </HStack>
             <Stack>
               {credentials[type].map((cred) => (
@@ -153,10 +179,15 @@ export const CredentialsSettingsForm = () => {
                             })
                     }
                     onDeleteClick={() =>
-                      deleteCredentials({
-                        workspaceId: workspace!.id,
-                        credentialsId: cred.id,
-                      })
+                      deleteCredentials(
+                        selectedScope === "workspace"
+                          ? {
+                              scope: "workspace",
+                              workspaceId: workspace!.id,
+                              credentialsId: cred.id,
+                            }
+                          : { scope: "user", credentialsId: cred.id },
+                      )
                     }
                   />
                   <Divider />
@@ -263,6 +294,7 @@ const CredentialsItem = ({
   onEditClick?: () => void;
   onDeleteClick: () => void;
 }) => {
+  const { t } = useTranslate();
   const initialFocusRef = useRef<HTMLButtonElement>(null);
 
   return (
@@ -291,19 +323,20 @@ const CredentialsItem = ({
                 <PopoverArrow />
                 <PopoverBody>
                   <Stack spacing="2">
-                    <Text fontSize="sm" fontWeight="semibold">
-                      Are you sure?
+                    <Text fontSize="sm" fontWeight="medium">
+                      {t("confirmModal.defaultTitle")}
                     </Text>
                     <Text fontSize="sm">
-                      Make sure this credentials is not used in any of your
-                      published bot before proceeding.
+                      {t(
+                        "account.preferences.credentials.deleteButton.confirmMessage",
+                      )}
                     </Text>
                   </Stack>
                 </PopoverBody>
                 <PopoverFooter as={Flex} justifyContent="flex-end">
                   <HStack>
                     <Button ref={initialFocusRef} onClick={onClose} size="sm">
-                      Cancel
+                      {t("cancel")}
                     </Button>
                     <Button
                       colorScheme="red"
@@ -311,7 +344,7 @@ const CredentialsItem = ({
                       isLoading={isDeleting}
                       size="sm"
                     >
-                      Delete
+                      {t("delete")}
                     </Button>
                   </HStack>
                 </PopoverFooter>
@@ -327,8 +360,9 @@ const CredentialsItem = ({
 const groupCredentialsByType = (
   credentials: CredentialsInfo[],
 ): Record<CredentialsInfo["type"], CredentialsInfo[]> => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const groupedCredentials: any = {};
+  const groupedCredentials = {} as {
+    [key in CredentialsInfo["type"]]: CredentialsInfo[];
+  };
   credentials.forEach((cred) => {
     if (!groupedCredentials[cred.type]) {
       groupedCredentials[cred.type] = [];

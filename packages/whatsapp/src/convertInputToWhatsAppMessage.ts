@@ -7,11 +7,14 @@ import type { ContinueChatResponse } from "@typebot.io/bot-engine/schemas/api";
 import { env } from "@typebot.io/env";
 import { isDefined, isEmpty } from "@typebot.io/lib/utils";
 import { convertRichTextToMarkdown } from "@typebot.io/rich-text/convertRichTextToMarkdown";
+import { defaultSystemMessages } from "@typebot.io/settings/constants";
+import type { SystemMessages } from "@typebot.io/settings/schemas";
 import type { WhatsAppSendingMessage } from "./schemas";
 
 export const convertInputToWhatsAppMessages = (
   input: NonNullable<ContinueChatResponse["input"]>,
   lastMessage: ContinueChatResponse["messages"][number] | undefined,
+  systemMessages?: Pick<SystemMessages, "whatsAppPictureChoiceSelectLabel">,
 ): WhatsAppSendingMessage[] => {
   const lastMessageText =
     lastMessage?.type === BubbleBlockType.TEXT &&
@@ -22,6 +25,7 @@ export const convertInputToWhatsAppMessages = (
       : undefined;
   switch (input.type) {
     case InputBlockType.DATE:
+    case InputBlockType.TIME:
     case InputBlockType.EMAIL:
     case InputBlockType.FILE:
     case InputBlockType.NUMBER:
@@ -85,7 +89,9 @@ export const convertInputToWhatsAppMessages = (
                   type: "reply",
                   reply: {
                     id: item.id,
-                    title: "Select",
+                    title:
+                      systemMessages?.whatsAppPictureChoiceSelectLabel ??
+                      defaultSystemMessages.whatsAppPictureChoiceSelectLabel,
                   },
                 },
               ],
@@ -134,13 +140,46 @@ export const convertInputToWhatsAppMessages = (
         },
       }));
     }
+    case InputBlockType.CARDS: {
+      return input.items.map((item) => {
+        let bodyText = "";
+        if (item.title) bodyText += `*${item.title}*`;
+        if (item.description) {
+          if (item.title) bodyText += "\n\n";
+          bodyText += item.description;
+        }
+        return {
+          type: "interactive",
+          interactive: {
+            type: "button",
+            header: item.imageUrl
+              ? {
+                  type: "image",
+                  image: {
+                    link: item.imageUrl,
+                  },
+                }
+              : undefined,
+            body: isEmpty(bodyText) ? undefined : { text: bodyText },
+            action: {
+              buttons: (item.paths ?? []).slice(0, 3).map((path) => ({
+                type: "reply",
+                reply: {
+                  id: path.id,
+                  title: trimTextTo20Chars(path.text ?? ""),
+                },
+              })),
+            },
+          },
+        };
+      });
+    }
   }
 };
 
 const trimTextTo20Chars = (text: string): string =>
   text.length > 20 ? `${text.slice(0, 18)}..` : text;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const groupArrayByArraySize = (arr: any[], n: number) =>
   arr.reduce(
     (r, e, i) => (i % n ? r[r.length - 1].push(e) : r.push([e])) && r,

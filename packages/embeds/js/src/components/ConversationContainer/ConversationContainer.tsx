@@ -1,29 +1,47 @@
+import type { CommandData } from "@/features/commands/types";
 import { continueChatQuery } from "@/queries/continueChatQuery";
 import { saveClientLogsQuery } from "@/queries/saveClientLogsQuery";
 import type {
   BotContext,
   ChatChunk as ChatChunkType,
   InputSubmitContent,
-  OutgoingLog,
 } from "@/types";
+import {
+  type AvatarHistory,
+  addAvatarsToHistoryIfChanged,
+  initializeAvatarHistory,
+} from "@/utils/avatarHistory";
+import { botContainer } from "@/utils/botContainerSignal";
+import { isNetworkError } from "@/utils/error";
 import { executeClientSideAction } from "@/utils/executeClientSideActions";
 import {
   formattedMessages,
   setFormattedMessages,
 } from "@/utils/formattedMessagesSignal";
 import { getAnswerContent } from "@/utils/getAnswerContent";
+import { hiddenInput, setHiddenInput } from "@/utils/hiddenInputSignal";
+import { setIsMediumContainer, setIsMobile } from "@/utils/isMobileSignal";
 import { persist } from "@/utils/persist";
+import { setGeneralBackground } from "@/utils/setCssVariablesValue";
 import { setStreamingMessage } from "@/utils/streamingMessageSignal";
+import { toaster } from "@/utils/toaster";
 import type { InputBlock } from "@typebot.io/blocks-inputs/schema";
 import type {
-  ChatLog,
   ContinueChatResponse,
   Message,
   StartChatResponse,
 } from "@typebot.io/bot-engine/schemas/api";
+import type { ClientSideAction } from "@typebot.io/bot-engine/schemas/clientSideAction";
+import { parseUnknownClientError } from "@typebot.io/lib/parseUnknownClientError";
 import { isNotDefined } from "@typebot.io/lib/utils";
-import type { Theme } from "@typebot.io/theme/schemas";
-import { HTTPError } from "ky";
+import type { LogInSession } from "@typebot.io/logs/schemas";
+import { latestTypebotVersion } from "@typebot.io/schemas/versions";
+import { defaultSystemMessages } from "@typebot.io/settings/constants";
+import {
+  BackgroundType,
+  defaultContainerBackgroundColor,
+} from "@typebot.io/theme/constants";
+import { cx } from "@typebot.io/ui/lib/cva";
 import {
   For,
   Show,
@@ -34,34 +52,9 @@ import {
 } from "solid-js";
 import { ChatChunk } from "./ChatChunk";
 import { LoadingChunk } from "./LoadingChunk";
-import { PopupBlockedToast } from "./PopupBlockedToast";
 
-const autoScrollBottomToleranceScreenPercent = 0.6;
-const bottomSpacerHeight = 128;
-
-const parseDynamicTheme = (
-  initialTheme: Theme,
-  dynamicTheme: ContinueChatResponse["dynamicTheme"],
-): Theme => ({
-  ...initialTheme,
-  chat: {
-    ...initialTheme.chat,
-    hostAvatar:
-      initialTheme.chat?.hostAvatar && dynamicTheme?.hostAvatarUrl
-        ? {
-            ...initialTheme.chat.hostAvatar,
-            url: dynamicTheme.hostAvatarUrl,
-          }
-        : initialTheme.chat?.hostAvatar,
-    guestAvatar:
-      initialTheme.chat?.guestAvatar && dynamicTheme?.guestAvatarUrl
-        ? {
-            ...initialTheme.chat.guestAvatar,
-            url: dynamicTheme?.guestAvatarUrl,
-          }
-        : initialTheme.chat?.guestAvatar,
-  },
-});
+const AUTO_SCROLL_CLIENT_HEIGHT_PERCENT_TOLERANCE = 0.6;
+const AUTO_SCROLL_DELAY = 50;
 
 type Props = {
   initialChatReply: StartChatResponse;
@@ -69,19 +62,22 @@ type Props = {
   onNewInputBlock?: (inputBlock: InputBlock) => void;
   onAnswer?: (answer: { message: string; blockId: string }) => void;
   onEnd?: () => void;
-  onNewLogs?: (logs: OutgoingLog[]) => void;
+  onNewLogs?: (logs: LogInSession[]) => void;
   onProgressUpdate?: (progress: number) => void;
   onScriptExecutionSuccess?: (message: string) => void;
 };
 
 export const ConversationContainer = (props: Props) => {
   let chatContainer: HTMLDivElement | undefined;
-  const [chatChunks, setChatChunks, isRecovered, setIsRecovered] = persist(
+  const resizeObserver = new ResizeObserver((entries) => {
+    setIsMobile((entries[0]?.target.clientWidth ?? 0) < 432);
+    setIsMediumContainer((entries[0]?.target.clientWidth ?? 0) < 550);
+  });
+  const [chatChunks, setChatChunks] = persist(
     createSignal<ChatChunkType[]>([
       {
         input: props.initialChatReply.input,
         messages: props.initialChatReply.messages,
-        clientSideActions: props.initialChatReply.clientSideActions,
       },
     ]),
     {
@@ -94,27 +90,107 @@ export const ConversationContainer = (props: Props) => {
       },
     },
   );
-  const [dynamicTheme, setDynamicTheme] = createSignal<
-    ContinueChatResponse["dynamicTheme"]
-  >(props.initialChatReply.dynamicTheme);
-  const [theme, setTheme] = createSignal(props.initialChatReply.typebot.theme);
+  const [clientSideActions, setClientSideActions] = persist(
+    createSignal<ClientSideAction[]>(
+      props.initialChatReply.clientSideActions ?? [],
+    ),
+    {
+      key: `typebot-${props.context.typebot.id}-clientSideActions`,
+      storage: props.context.storage,
+    },
+  );
+  const [isEnded, setIsEnded] = persist(createSignal(false), {
+    key: `typebot-${props.context.typebot.id}-isEnded`,
+    storage: props.context.storage,
+  });
+  const [totalChunksDisplayed, setTotalChunksDisplayed] = persist(
+    createSignal(0),
+    {
+      key: `typebot-${props.context.typebot.id}-totalChunksDisplayed`,
+      storage: props.context.storage,
+    },
+  );
   const [isSending, setIsSending] = createSignal(false);
-  const [blockedPopupUrl, setBlockedPopupUrl] = createSignal<string>();
+  const [isLastAutoScrollAtBottom, setIsLastAutoScrollAtBottom] =
+    createSignal(true);
   const [hasError, setHasError] = createSignal(false);
+  const [inputAnswered, setInputAnswered] = createSignal<{
+    [key: string]: boolean;
+  }>({});
+
+  const [avatarsHistory, setAvatarsHistory] = persist(
+    createSignal<AvatarHistory[]>(
+      initializeAvatarHistory({
+        initialTheme: props.initialChatReply.typebot.theme,
+        dynamicTheme: props.initialChatReply.dynamicTheme,
+      }),
+    ),
+    {
+      key: `typebot-${props.context.typebot.id}-avatarsHistory`,
+      storage: props.context.storage,
+    },
+  );
 
   onMount(() => {
+    if (chatContainer) resizeObserver.observe(chatContainer);
+
+    window.addEventListener("message", processIncomingEvent);
     (async () => {
-      const initialChunk = chatChunks()[0]!;
-      if (!initialChunk.clientSideActions) return;
-      const actionsBeforeFirstBubble = initialChunk.clientSideActions.filter(
-        (action) => isNotDefined(action.lastBubbleBlockId),
-      );
-      await processClientSideActions(actionsBeforeFirstBubble);
+      const isRecoveredFromStorage = chatChunks().length > 1;
+      if (isRecoveredFromStorage) {
+        cleanupRecoveredChat();
+      } else {
+        const actionsBeforeFirstBubble = clientSideActions()?.filter((action) =>
+          isNotDefined(action.lastBubbleBlockId),
+        );
+        await processClientSideActions(actionsBeforeFirstBubble);
+      }
     })();
   });
 
+  createEffect((prevUrl: string | undefined) => {
+    if (prevUrl === props.initialChatReply.typebot.theme.chat?.hostAvatar?.url)
+      return prevUrl;
+    setAvatarsHistory((prev) => [
+      ...prev,
+      {
+        role: "host",
+        chunkIndex: chatChunks().length - 1,
+        avatarUrl: props.initialChatReply.typebot.theme.chat?.hostAvatar?.url,
+      },
+    ]);
+    return props.initialChatReply.typebot.theme.chat?.hostAvatar?.url;
+  }, props.initialChatReply.typebot.theme.chat?.hostAvatar?.url);
+
+  createEffect((prevUrl: string | undefined) => {
+    if (prevUrl === props.initialChatReply.typebot.theme.chat?.guestAvatar?.url)
+      return prevUrl;
+    setAvatarsHistory((prev) => [
+      ...prev,
+      {
+        role: "guest",
+        chunkIndex: chatChunks().length - 1,
+        avatarUrl: props.initialChatReply.typebot.theme.chat?.guestAvatar?.url,
+      },
+    ]);
+    return props.initialChatReply.typebot.theme.chat?.guestAvatar?.url;
+  }, props.initialChatReply.typebot.theme.chat?.guestAvatar?.url);
+
+  const cleanupRecoveredChat = () => {
+    if ([...chatChunks()].pop()?.streamingMessageId)
+      setChatChunks((chunks) => chunks.slice(0, -1));
+    const actionsBeforeFirstBubble = getNextClientSideActionsBatch({
+      clientSideActions: clientSideActions(),
+      lastBubbleBlockId: undefined,
+    });
+    setClientSideActions((actions) =>
+      actions.slice(actionsBeforeFirstBubble.length),
+    );
+  };
+
   const streamMessage = ({ id, message }: { id: string; message: string }) => {
     setIsSending(false);
+    setIsLastAutoScrollAtBottom(false);
     const lastChunk = [...chatChunks()].pop();
     if (!lastChunk) return;
     if (lastChunk.streamingMessageId !== id)
@@ -128,13 +204,7 @@ export const ConversationContainer = (props: Props) => {
     setStreamingMessage({ id, content: message });
   };
 
-  createEffect(() => {
-    setTheme(
-      parseDynamicTheme(props.initialChatReply.typebot.theme, dynamicTheme()),
-    );
-  });
-
-  const saveLogs = async (clientLogs?: ChatLog[]) => {
+  const saveLogs = async (clientLogs?: LogInSession[]) => {
     if (!clientLogs) return;
     props.onNewLogs?.(clientLogs);
     if (props.context.isPreview) return;
@@ -145,19 +215,43 @@ export const ConversationContainer = (props: Props) => {
     });
   };
 
+  const showOfflineErrorToast = () => {
+    toaster.create({
+      title:
+        props.context.typebot.settings.general?.systemMessages
+          ?.networkErrorTitle ?? defaultSystemMessages.networkErrorTitle,
+      description:
+        props.context.typebot.settings.general?.systemMessages
+          ?.networkErrorMessage ?? defaultSystemMessages.networkErrorMessage,
+    });
+  };
+
   const sendMessage = async (answer?: InputSubmitContent) => {
-    setIsRecovered(false);
+    if (hasError() && clientSideActions().length > 0) {
+      setHasError(false);
+      await processClientSideActions(clientSideActions());
+      return;
+    }
     setHasError(false);
     const currentInputBlock = [...chatChunks()].pop()?.input;
-    if (currentInputBlock?.id && props.onAnswer && answer)
-      props.onAnswer({
-        message: getAnswerContent(answer),
-        blockId: currentInputBlock.id,
-      });
+
+    if (currentInputBlock?.id && answer) {
+      if (props.onAnswer)
+        props.onAnswer({
+          message: getAnswerContent(answer),
+          blockId: currentInputBlock.id,
+        });
+      setInputAnswered((prev) => ({
+        ...prev,
+        [parseInputUniqueKey(currentInputBlock.id)]: true,
+      }));
+    }
+
     const longRequest = setTimeout(() => {
       setIsSending(true);
     }, 1000);
     autoScrollToBottom();
+
     const { data, error } = await continueChatQuery({
       apiHost: props.context.apiHost,
       sessionId: props.initialChatReply.sessionId,
@@ -165,20 +259,25 @@ export const ConversationContainer = (props: Props) => {
     });
     clearTimeout(longRequest);
     setIsSending(false);
+
+    await processContinueChatResponse({ data, error });
+
+    if (!navigator.onLine || isNetworkError(error as Error)) {
+      showOfflineErrorToast();
+    }
+  };
+
+  const processContinueChatResponse = async ({
+    data,
+    error,
+  }: { data: ContinueChatResponse | undefined; error: unknown }) => {
     if (error) {
       setHasError(true);
       const errorLogs = [
-        {
-          description: "Failed to send the reply",
-          details:
-            error instanceof HTTPError
-              ? {
-                  status: error.response.status,
-                  body: await error.response.json(),
-                }
-              : error,
-          status: "error",
-        },
+        await parseUnknownClientError({
+          err: error,
+          context: "While sending message",
+        }),
       ];
       await saveClientLogsQuery({
         apiHost: props.context.apiHost,
@@ -200,14 +299,37 @@ export const ConversationContainer = (props: Props) => {
       ]);
     }
     if (data.logs) props.onNewLogs?.(data.logs);
-    if (data.dynamicTheme) setDynamicTheme(data.dynamicTheme);
+    if (data.dynamicTheme) {
+      setAvatarsHistory((prev) =>
+        addAvatarsToHistoryIfChanged({
+          newAvatars: {
+            host: data.dynamicTheme?.hostAvatarUrl,
+            guest: data.dynamicTheme?.guestAvatarUrl,
+          },
+          avatarHistory: prev,
+          currentChunkIndex: chatChunks().length,
+        }),
+      );
+      if (data.dynamicTheme?.backgroundUrl)
+        setGeneralBackground({
+          background: {
+            type: BackgroundType.IMAGE,
+            content: data.dynamicTheme?.backgroundUrl,
+          },
+          documentStyle:
+            botContainer()?.style ?? document.documentElement.style,
+          typebotVersion: latestTypebotVersion,
+        });
+    }
     if (data.input && props.onNewInputBlock) {
       props.onNewInputBlock(data.input);
     }
     if (data.clientSideActions) {
-      const actionsBeforeFirstBubble = data.clientSideActions.filter((action) =>
-        isNotDefined(action.lastBubbleBlockId),
-      );
+      setClientSideActions(data.clientSideActions);
+      const actionsBeforeFirstBubble = getNextClientSideActionsBatch({
+        clientSideActions: data.clientSideActions,
+        lastBubbleBlockId: undefined,
+      });
       await processClientSideActions(actionsBeforeFirstBubble);
       if (
         data.clientSideActions.length === 1 &&
@@ -221,58 +343,90 @@ export const ConversationContainer = (props: Props) => {
       ...displayedChunks,
       {
         input: data.input,
-        messages: data.messages,
-        clientSideActions: data.clientSideActions,
+        messages: data.messages.filter((message) => {
+          return (
+            message.type !== "text" ||
+            message.content.type !== "richText" ||
+            message.content.richText.length > 1 ||
+            message.content.richText[0].type !== "variable" ||
+            message.content.richText[0].children.length > 0
+          );
+        }),
       },
     ]);
   };
 
-  const autoScrollToBottom = (lastElement?: HTMLDivElement, offset = 0) => {
+  const autoScrollToBottom = ({
+    lastElement,
+    offset = 0,
+  }: { lastElement?: HTMLDivElement; offset?: number } = {}) => {
     if (!chatContainer) return;
 
-    const bottomTolerance =
-      chatContainer.clientHeight * autoScrollBottomToleranceScreenPercent -
-      bottomSpacerHeight;
+    const isBottomOfLastElementTooFarBelow =
+      chatContainer.scrollTop + chatContainer.clientHeight <
+      chatContainer.scrollHeight -
+        chatContainer.clientHeight *
+          AUTO_SCROLL_CLIENT_HEIGHT_PERCENT_TOLERANCE;
 
-    const isBottomOfLastElementInView =
-      chatContainer.scrollTop + chatContainer.clientHeight >=
-      chatContainer.scrollHeight - bottomTolerance;
+    if (isBottomOfLastElementTooFarBelow && !isLastAutoScrollAtBottom()) return;
 
-    if (isBottomOfLastElementInView) {
-      setTimeout(() => {
-        chatContainer?.scrollTo(
-          0,
-          lastElement
-            ? lastElement.offsetTop - offset
-            : chatContainer.scrollHeight,
-        );
-      }, 50);
-    }
+    const onScrollEnd = (callback: () => void) => {
+      let scrollTimeout: number;
+
+      const scrollListener = () => {
+        clearTimeout(scrollTimeout);
+
+        scrollTimeout = window.setTimeout(() => {
+          callback();
+          chatContainer.removeEventListener("scroll", scrollListener);
+        }, 100);
+      };
+
+      chatContainer.addEventListener("scroll", scrollListener, {
+        passive: true,
+      });
+    };
+
+    setTimeout(() => {
+      onScrollEnd(() => {
+        const isAtBottom =
+          Math.abs(
+            chatContainer.scrollHeight -
+              chatContainer.scrollTop -
+              chatContainer.clientHeight,
+          ) < 2;
+        setIsLastAutoScrollAtBottom(isAtBottom);
+      });
+      chatContainer?.scrollTo({
+        top: lastElement
+          ? lastElement.offsetTop - offset
+          : chatContainer.scrollHeight,
+        behavior: "smooth",
+      });
+    }, AUTO_SCROLL_DELAY);
   };
 
   const handleAllBubblesDisplayed = async () => {
+    if (chatChunks().length > totalChunksDisplayed())
+      setTotalChunksDisplayed((prev) => prev + 1);
     const lastChunk = [...chatChunks()].pop();
     if (!lastChunk) return;
     if (isNotDefined(lastChunk.input)) {
+      setIsEnded(true);
       props.onEnd?.();
     }
   };
 
   const handleNewBubbleDisplayed = async (blockId: string) => {
-    const lastChunk = [...chatChunks()].pop();
-    if (!lastChunk) return;
-    if (lastChunk.clientSideActions) {
-      const actionsToExecute = lastChunk.clientSideActions.filter(
-        (action) => action.lastBubbleBlockId === blockId,
-      );
-      await processClientSideActions(actionsToExecute);
-    }
+    const actionsToExecute = getNextClientSideActionsBatch({
+      clientSideActions: clientSideActions(),
+      lastBubbleBlockId: blockId,
+    });
+    await processClientSideActions(actionsToExecute);
   };
 
-  const processClientSideActions = async (
-    actions: NonNullable<ContinueChatResponse["clientSideActions"]>,
-  ) => {
-    if (isRecovered()) return;
+  const processClientSideActions = async (actions: ClientSideAction[]) => {
+    let hasStreamError = false;
     for (const action of actions) {
       if (
         "streamOpenAiChatCompletion" in action ||
@@ -284,11 +438,28 @@ export const ConversationContainer = (props: Props) => {
         clientSideAction: action,
         context: {
           apiHost: props.context.apiHost,
+          wsHost: props.context.wsHost,
           sessionId: props.initialChatReply.sessionId,
           resultId: props.initialChatReply.resultId,
         },
         onMessageStream: streamMessage,
+        onStreamError: async (error) => {
+          setHasError(true);
+          hasStreamError = true;
+          await saveLogs([error]);
+          props.onNewLogs?.([error]);
+        },
       });
+      if ("streamOpenAiChatCompletion" in action || "stream" in action) {
+        setTotalChunksDisplayed((prev) => prev + 1);
+        if (response && "replyToSend" in response && !response.replyToSend) {
+          setIsSending(false);
+          continue;
+        }
+      }
+      if (hasStreamError) return;
+
+      setClientSideActions((actions) => actions.slice(1));
       if (response && "logs" in response) saveLogs(response.logs);
       if (response && "replyToSend" in response) {
         setIsSending(false);
@@ -299,74 +470,162 @@ export const ConversationContainer = (props: Props) => {
         );
         return;
       }
-      if (response && "blockedPopupUrl" in response)
-        setBlockedPopupUrl(response.blockedPopupUrl);
+      if (response && "blockedPopupUrl" in response) {
+        toaster.create({
+          title:
+            props.context.typebot.settings.general?.systemMessages
+              ?.popupBlockedTitle ?? defaultSystemMessages.popupBlockedTitle,
+          description:
+            props.context.typebot.settings.general?.systemMessages
+              ?.popupBlockedDescription ??
+            defaultSystemMessages.popupBlockedDescription,
+          meta: {
+            link: response.blockedPopupUrl,
+          },
+        });
+      }
       if (response && "scriptCallbackMessage" in response)
         props.onScriptExecutionSuccess?.(response.scriptCallbackMessage);
     }
   };
 
   onCleanup(() => {
+    if (chatContainer) resizeObserver.unobserve(chatContainer);
     setStreamingMessage(undefined);
     setFormattedMessages([]);
+    window.removeEventListener("message", processIncomingEvent);
   });
+
+  const processIncomingEvent = async (event: MessageEvent<CommandData>) => {
+    const { data } = event;
+    if (
+      !data.isFromTypebot ||
+      (data.id && props.context.typebot.id !== data.id)
+    )
+      return;
+    if (data.command === "sendCommand" && !isEnded())
+      await sendCommandAndProcessResponse(data.text);
+  };
+
+  const sendCommandAndProcessResponse = async (
+    command: string,
+    retryCount = 0,
+    maxRetries = 5,
+  ) => {
+    if (isSending()) {
+      if (retryCount >= maxRetries) {
+        throw new Error("Max retry attempts for command reached");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+      return sendCommandAndProcessResponse(command, retryCount + 1, maxRetries);
+    }
+
+    const currentInputBlock = [...chatChunks()].pop()?.input;
+    if (
+      currentInputBlock?.id &&
+      !inputAnswered()[parseInputUniqueKey(currentInputBlock.id)]
+    )
+      setHiddenInput((prev) => ({
+        ...prev,
+        [parseInputUniqueKey(currentInputBlock.id)]: true,
+      }));
+    const longRequest = setTimeout(() => {
+      setIsSending(true);
+    }, 1000);
+    autoScrollToBottom();
+    const { data, error } = await continueChatQuery({
+      apiHost: props.context.apiHost,
+      sessionId: props.initialChatReply.sessionId,
+      message: {
+        type: "command",
+        command,
+      },
+    });
+    clearTimeout(longRequest);
+    setIsSending(false);
+    return processContinueChatResponse({ data, error });
+  };
+
+  const parseInputUniqueKey = (id: string) =>
+    `${id}-${chatChunks().length - 1}`;
 
   const handleSkip = () => sendMessage(undefined);
 
   return (
     <div
       ref={chatContainer}
-      class="flex flex-col overflow-y-auto w-full px-3 pt-10 relative scrollable-container typebot-chat-view scroll-smooth gap-2"
+      class={cx(
+        "overflow-y-auto relative scrollable-container typebot-chat-view scroll-smooth w-full min-h-full flex flex-col items-center",
+        (props.initialChatReply.typebot.theme.chat?.container
+          ?.backgroundColor ?? defaultContainerBackgroundColor) !==
+          "transparent" && "max-w-chat-container",
+      )}
     >
-      <For each={chatChunks()}>
-        {(chatChunk, index) => (
-          <ChatChunk
-            index={index()}
-            messages={chatChunk.messages}
-            input={chatChunk.input}
-            theme={theme()}
-            settings={props.initialChatReply.typebot.settings}
-            streamingMessageId={chatChunk.streamingMessageId}
-            context={props.context}
-            hideAvatar={
-              !chatChunk.input &&
-              ((chatChunks()[index() + 1]?.messages ?? []).length > 0 ||
-                chatChunks()[index() + 1]?.streamingMessageId !== undefined ||
-                (chatChunk.messages.length > 0 && isSending()))
-            }
-            hasError={hasError() && index() === chatChunks().length - 1}
-            isTransitionDisabled={index() !== chatChunks().length - 1}
-            onNewBubbleDisplayed={handleNewBubbleDisplayed}
-            onAllBubblesDisplayed={handleAllBubblesDisplayed}
-            onSubmit={sendMessage}
-            onScrollToBottom={autoScrollToBottom}
-            onSkip={handleSkip}
-          />
-        )}
-      </For>
-      <Show when={isSending()}>
-        <LoadingChunk theme={theme()} />
-      </Show>
-      <Show when={blockedPopupUrl()} keyed>
-        {(blockedPopupUrl) => (
-          <div class="flex justify-end">
-            <PopupBlockedToast
-              url={blockedPopupUrl}
-              onLinkClick={() => setBlockedPopupUrl(undefined)}
+      <div class="max-w-chat-container w-full flex flex-col gap-2">
+        <For each={chatChunks().slice(0, totalChunksDisplayed() + 1)}>
+          {(chatChunk, index) => (
+            <ChatChunk
+              index={index()}
+              messages={chatChunk.messages}
+              input={chatChunk.input}
+              theme={props.initialChatReply.typebot.theme}
+              avatarsHistory={avatarsHistory()}
+              settings={props.initialChatReply.typebot.settings}
+              streamingMessageId={chatChunk.streamingMessageId}
+              context={props.context}
+              hideAvatar={
+                (!chatChunk.input ||
+                  hiddenInput()[`${chatChunk.input.id}-${index()}`]) &&
+                ((
+                  chatChunks().slice(0, totalChunksDisplayed() + 1)[index() + 1]
+                    ?.messages ?? []
+                ).length > 0 ||
+                  chatChunks().slice(0, totalChunksDisplayed() + 1)[index() + 1]
+                    ?.streamingMessageId !== undefined ||
+                  (chatChunk.messages.length > 0 && isSending()))
+              }
+              hasError={
+                hasError() &&
+                index() ===
+                  chatChunks().slice(0, totalChunksDisplayed() + 1).length - 1
+              }
+              isTransitionDisabled={
+                index() !==
+                chatChunks().slice(0, totalChunksDisplayed() + 1).length - 1
+              }
+              isOngoingLastChunk={
+                !isEnded() &&
+                index() ===
+                  chatChunks().slice(0, totalChunksDisplayed() + 1).length - 1
+              }
+              onNewBubbleDisplayed={handleNewBubbleDisplayed}
+              onAllBubblesDisplayed={handleAllBubblesDisplayed}
+              onSubmit={sendMessage}
+              onScrollToBottom={autoScrollToBottom}
+              onSkip={handleSkip}
             />
-          </div>
-        )}
-      </Show>
+          )}
+        </For>
+        <Show when={isSending()}>
+          <LoadingChunk
+            theme={props.initialChatReply.typebot.theme}
+            avatarSrc={
+              avatarsHistory().findLast((avatar) => avatar.role === "host")
+                ?.avatarUrl
+            }
+          />
+        </Show>
+      </div>
+
       <BottomSpacer />
     </div>
   );
 };
 
+// Needed because we need to simulate a bottom padding relative to the chat view height
 const BottomSpacer = () => (
-  <div
-    class="w-full flex-shrink-0 typebot-bottom-spacer"
-    style={{ height: bottomSpacerHeight + "px" }}
-  />
+  <div class="w-full flex-shrink-0 typebot-bottom-spacer h-[20%]" />
 );
 
 const convertSubmitContentToMessage = (
@@ -380,4 +639,22 @@ const convertSubmitContentToMessage = (
       attachedFileUrls: answer.attachments?.map((attachment) => attachment.url),
     };
   if (answer.type === "recording") return { type: "audio", url: answer.url };
+};
+
+const getNextClientSideActionsBatch = ({
+  clientSideActions,
+  lastBubbleBlockId,
+}: {
+  clientSideActions: ClientSideAction[];
+  lastBubbleBlockId: string | undefined;
+}) => {
+  const actionsBatch: ClientSideAction[] = [];
+  let currentLastBubbleBlockId = lastBubbleBlockId;
+  for (const action of clientSideActions) {
+    if (currentLastBubbleBlockId !== action.lastBubbleBlockId) break;
+    currentLastBubbleBlockId = action.lastBubbleBlockId;
+    if (lastBubbleBlockId === action.lastBubbleBlockId)
+      actionsBatch.push(action);
+  }
+  return actionsBatch;
 };

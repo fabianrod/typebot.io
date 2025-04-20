@@ -14,7 +14,7 @@ import { defaultTextInputOptions } from "@typebot.io/blocks-inputs/text/constant
 import type { TextInputBlock } from "@typebot.io/blocks-inputs/text/schema";
 import { getRuntimeVariable } from "@typebot.io/env/getRuntimeVariable";
 import { isDefined } from "@typebot.io/lib/utils";
-import clsx from "clsx";
+import { cx } from "@typebot.io/ui/lib/cva";
 import {
   For,
   Match,
@@ -70,6 +70,7 @@ export const TextInput = (props: Props) => {
           files: selectedFiles().map((file) => ({
             file: file,
             input: {
+              blockId: props.block.id,
               sessionId: props.context.sessionId,
               fileName: file.name,
             },
@@ -146,12 +147,16 @@ export const TextInput = (props: Props) => {
           params: {
             sizeLimit: getRuntimeVariable(
               "NEXT_PUBLIC_BOT_FILE_UPLOAD_MAX_SIZE",
-            ),
+            )
+              ? Number(
+                  getRuntimeVariable("NEXT_PUBLIC_BOT_FILE_UPLOAD_MAX_SIZE"),
+                )
+              : undefined,
           },
-          onError: ({ description, title }) => {
+          context: props.context,
+          onError: ({ description }) => {
             toaster.create({
               description,
-              title,
             });
           },
         }),
@@ -217,6 +222,7 @@ export const TextInput = (props: Props) => {
             {
               file: audioFile,
               input: {
+                blockId: props.block.id,
                 sessionId: props.context.sessionId,
                 fileName: audioFile.name,
               },
@@ -246,7 +252,7 @@ export const TextInput = (props: Props) => {
 
   return (
     <div
-      class={clsx(
+      class={cx(
         "typebot-input-form flex w-full gap-2 items-end",
         props.block.options?.isLong && recordingStatus() !== "started"
           ? "max-w-full"
@@ -258,7 +264,7 @@ export const TextInput = (props: Props) => {
       onDragLeave={handleDragLeave}
     >
       <div
-        class={clsx(
+        class={cx(
           "relative typebot-input flex-col w-full",
           isDraggingOver() && "filter brightness-95",
         )}
@@ -266,6 +272,7 @@ export const TextInput = (props: Props) => {
         <VoiceRecorder
           recordingStatus={recordingStatus()}
           buttonsTheme={props.context.typebot.theme.chat?.buttons}
+          context={props.context}
           onRecordingConfirmed={handleRecordingConfirmed}
           onAbortRecording={handleRecordingAbort}
         />
@@ -295,7 +302,7 @@ export const TextInput = (props: Props) => {
             </div>
           </Show>
           <div
-            class={clsx(
+            class={cx(
               "flex justify-between px-2",
               props.block.options?.isLong ? "items-end" : "items-center",
             )}
@@ -331,7 +338,7 @@ export const TextInput = (props: Props) => {
             >
               <TextInputAddFileButton
                 onNewFiles={onNewFiles}
-                class={clsx(props.block.options?.isLong ? "ml-2" : undefined)}
+                class={cx(props.block.options?.isLong ? "ml-2" : undefined)}
               />
             </Show>
           </div>

@@ -185,14 +185,16 @@ export const AutocompleteInput = ({
                 overflowY="auto"
                 role="menu"
                 w="inherit"
-                shadow="lg"
+                shadow="md"
                 onMouseDown={(e) => e.stopPropagation()}
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 {filteredItems.map((item, idx) => {
                   return (
                     <Button
-                      ref={(el) => (itemsRef.current[idx] = el)}
+                      ref={(el) => {
+                        itemsRef.current[idx] = el;
+                      }}
                       minH="40px"
                       key={idx}
                       onClick={handleItemClick(item)}

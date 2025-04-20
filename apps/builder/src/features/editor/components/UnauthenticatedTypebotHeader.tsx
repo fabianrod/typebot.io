@@ -1,7 +1,8 @@
 import { EmojiOrImageIcon } from "@/components/EmojiOrImageIcon";
 import { TypebotLogo } from "@/components/TypebotLogo";
 import { CopyIcon, PlayIcon } from "@/components/icons";
-import { useUser } from "@/features/account/hooks/useUser";
+import { useUser } from "@/features/user/hooks/useUser";
+import { useRightPanel } from "@/hooks/useRightPanel";
 import {
   Button,
   Divider,
@@ -16,7 +17,7 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import React from "react";
 import { headerHeight } from "../constants";
-import { RightPanel, useEditor } from "../providers/EditorProvider";
+import { useEditor } from "../providers/EditorProvider";
 import { useTypebot } from "../providers/TypebotProvider";
 
 export const GuestTypebotHeader = () => {
@@ -24,18 +25,13 @@ export const GuestTypebotHeader = () => {
   const router = useRouter();
   const { user } = useUser();
   const { typebot, save } = useTypebot();
-  const {
-    setRightPanel,
-    rightPanel,
-    setStartPreviewAtGroup,
-    setStartPreviewAtEvent,
-  } = useEditor();
+  const { setStartPreviewFrom } = useEditor();
+  const [rightPanel, setRightPanel] = useRightPanel();
 
   const handlePreviewClick = async () => {
-    setStartPreviewAtGroup(undefined);
-    setStartPreviewAtEvent(undefined);
+    setStartPreviewFrom(undefined);
     save().then();
-    setRightPanel(RightPanel.PREVIEW);
+    setRightPanel("preview");
   };
 
   return (
@@ -45,9 +41,9 @@ export const GuestTypebotHeader = () => {
       justify="center"
       align="center"
       h={`${headerHeight}px`}
-      zIndex={100}
+      zIndex={1}
       pos="relative"
-      bgColor={useColorModeValue("white", "gray.900")}
+      bgColor={useColorModeValue("white", "gray.950")}
       flexShrink={0}
     >
       <HStack
@@ -58,7 +54,7 @@ export const GuestTypebotHeader = () => {
         <Button
           as={Link}
           href={`/typebots/${typebot?.id}/edit`}
-          colorScheme={router.pathname.includes("/edit") ? "blue" : "gray"}
+          colorScheme={router.pathname.includes("/edit") ? "orange" : "gray"}
           variant={router.pathname.includes("/edit") ? "outline" : "ghost"}
           size="sm"
         >
@@ -67,7 +63,7 @@ export const GuestTypebotHeader = () => {
         <Button
           as={Link}
           href={`/typebots/${typebot?.id}/theme`}
-          colorScheme={router.pathname.endsWith("theme") ? "blue" : "gray"}
+          colorScheme={router.pathname.endsWith("theme") ? "orange" : "gray"}
           variant={router.pathname.endsWith("theme") ? "outline" : "ghost"}
           size="sm"
         >
@@ -76,7 +72,7 @@ export const GuestTypebotHeader = () => {
         <Button
           as={Link}
           href={`/typebots/${typebot?.id}/settings`}
-          colorScheme={router.pathname.endsWith("settings") ? "blue" : "gray"}
+          colorScheme={router.pathname.endsWith("settings") ? "orange" : "gray"}
           variant={router.pathname.endsWith("settings") ? "outline" : "ghost"}
           size="sm"
         >
@@ -136,7 +132,7 @@ export const GuestTypebotHeader = () => {
           )}
           {router.pathname.includes("/edit") && isNotDefined(rightPanel) && (
             <Button
-              colorScheme="blue"
+              colorScheme="orange"
               onClick={handlePreviewClick}
               isLoading={isNotDefined(typebot)}
               leftIcon={<PlayIcon />}
@@ -153,7 +149,7 @@ export const GuestTypebotHeader = () => {
             <Button
               as={Link}
               href={`/register`}
-              leftIcon={<TypebotLogo width="20px" />}
+              leftIcon={<TypebotLogo />}
               variant="outline"
               size="sm"
             >

@@ -5,20 +5,22 @@ import { InputBlockType } from "@typebot.io/blocks-inputs/constants";
 import { defaultPictureChoiceOptions } from "@typebot.io/blocks-inputs/pictureChoice/constants";
 import type { InputBlock } from "@typebot.io/blocks-inputs/schema";
 import { LogicBlockType } from "@typebot.io/blocks-logic/constants";
+import type { TypebotInSession } from "@typebot.io/chat-session/schemas";
 import { executeCondition } from "@typebot.io/conditions/executeCondition";
 import type { Group } from "@typebot.io/groups/schemas";
 import { createId } from "@typebot.io/lib/createId";
 import type { Answer } from "@typebot.io/results/schemas/answers";
+import type { SessionStore } from "@typebot.io/runtime-session-store";
 import type { Edge } from "@typebot.io/typebot/schemas/edge";
 import { parseVariables } from "@typebot.io/variables/parseVariables";
 import type { Variable } from "@typebot.io/variables/schemas";
 import type { SetVariableHistoryItem } from "@typebot.io/variables/schemas";
+import { isTypebotInSessionAtLeastV6 } from "./helpers/isTypebotInSessionAtLeastV6";
 import {
   type BubbleBlockWithDefinedContent,
   parseBubbleBlock,
 } from "./parseBubbleBlock";
 import type { ContinueChatResponse } from "./schemas/api";
-import type { TypebotInSession } from "./schemas/chatSession";
 
 type TranscriptMessage = {
   role: "bot" | "user";
@@ -50,6 +52,7 @@ export const computeResultTranscript = ({
   setVariableHistory,
   visitedEdges,
   stopAtBlockId,
+  sessionStore,
 }: {
   typebot: TypebotInSession;
   answers: Pick<Answer, "blockId" | "content" | "attachedFileUrls">[];
@@ -59,6 +62,7 @@ export const computeResultTranscript = ({
   >[];
   visitedEdges: string[];
   stopAtBlockId?: string;
+  sessionStore: SessionStore;
 }): TranscriptMessage[] => {
   const firstEdgeId = getFirstEdgeId(typebot);
   if (!firstEdgeId) return [];
@@ -74,11 +78,13 @@ export const computeResultTranscript = ({
     setVariableHistory: [...setVariableHistory],
     visitedEdges,
     stopAtBlockId,
+    sessionStore,
   });
 };
 
 const getFirstEdgeId = (typebot: TypebotInSession) => {
-  if (typebot.version === "6") return typebot.events?.[0].outgoingEdgeId;
+  if (isTypebotInSessionAtLeastV6(typebot))
+    return typebot.events?.[0].outgoingEdgeId;
   return typebot.groups.at(0)?.blocks.at(0)?.outgoingEdgeId;
 };
 
@@ -104,6 +110,7 @@ const executeGroup = ({
   setVariableHistory,
   visitedEdges,
   stopAtBlockId,
+  sessionStore,
 }: {
   currentTranscript: TranscriptMessage[];
   nextGroup:
@@ -123,6 +130,7 @@ const executeGroup = ({
   >[];
   visitedEdges: string[];
   stopAtBlockId?: string;
+  sessionStore: SessionStore;
 }): TranscriptMessage[] => {
   if (!nextGroup) return currentTranscript;
   for (const block of nextGroup?.group.blocks.slice(
@@ -151,6 +159,7 @@ const executeGroup = ({
           variables: typebot.variables,
           typebotVersion: typebot.version,
           textBubbleContentFormat: "markdown",
+          sessionStore,
         },
       );
       const newMessage =
@@ -203,10 +212,10 @@ const executeGroup = ({
             ? `${answer.attachedFileUrls?.join(", ")}\n\n${answer.content}`
             : answer.content,
       });
-      const outgoingEdge = getOutgoingEdgeId({
-        block,
+      const outgoingEdge = getOutgoingEdgeId(block, {
         answer: answer.content,
         variables: typebot.variables,
+        sessionStore,
       });
       if (outgoingEdge.isOffDefaultPath) visitedEdges.shift();
       nextEdgeId = outgoingEdge.edgeId;
@@ -214,9 +223,9 @@ const executeGroup = ({
       const passedCondition = block.items.find(
         (item) =>
           item.content &&
-          executeCondition({
+          executeCondition(item.content, {
             variables: typebot.variables,
-            condition: item.content,
+            sessionStore,
           }),
       );
       if (passedCondition) {
@@ -298,6 +307,7 @@ const executeGroup = ({
         },
         visitedEdges,
         stopAtBlockId,
+        sessionStore,
       });
     }
     if (nextEdgeId) {
@@ -311,6 +321,7 @@ const executeGroup = ({
           nextGroup,
           visitedEdges,
           stopAtBlockId,
+          sessionStore,
         });
       }
     }
@@ -331,6 +342,7 @@ const executeGroup = ({
       ),
       visitedEdges: visitedEdges.slice(1),
       stopAtBlockId,
+      sessionStore,
     });
   }
   return currentTranscript;
@@ -395,15 +407,18 @@ const convertChatMessageToTranscriptMessage = (
   }
 };
 
-const getOutgoingEdgeId = ({
-  block,
-  answer,
-  variables,
-}: {
-  block: InputBlock;
-  answer: string | undefined;
-  variables: Variable[];
-}): { edgeId: string | undefined; isOffDefaultPath: boolean } => {
+const getOutgoingEdgeId = (
+  block: InputBlock,
+  {
+    answer,
+    variables,
+    sessionStore,
+  }: {
+    answer: string | undefined;
+    variables: Variable[];
+    sessionStore: SessionStore;
+  },
+): { edgeId: string | undefined; isOffDefaultPath: boolean } => {
   if (
     block.type === InputBlockType.CHOICE &&
     !(
@@ -414,8 +429,10 @@ const getOutgoingEdgeId = ({
   ) {
     const matchedItem = block.items.find(
       (item) =>
-        parseVariables(variables)(item.content).normalize() ===
-        answer.normalize(),
+        parseVariables(item.content, {
+          variables,
+          sessionStore,
+        }).normalize() === answer.normalize(),
     );
     if (matchedItem?.outgoingEdgeId)
       return { edgeId: matchedItem.outgoingEdgeId, isOffDefaultPath: true };
@@ -430,7 +447,7 @@ const getOutgoingEdgeId = ({
   ) {
     const matchedItem = block.items.find(
       (item) =>
-        parseVariables(variables)(item.title).normalize() ===
+        parseVariables(item.title, { variables, sessionStore }).normalize() ===
         answer.normalize(),
     );
     if (matchedItem?.outgoingEdgeId)

@@ -65,7 +65,9 @@ export const UsageProgressBars = ({ workspace }: Props) => {
               </Tooltip>
             )}
             <Text fontSize="sm" fontStyle="italic" color="gray.500">
-              (Resets on {data?.resetsAt.toLocaleDateString()})
+              {t("billing.usage.chats.resetsOn", {
+                date: data?.resetsAt.toLocaleDateString(),
+              })}
             </Text>
           </HStack>
 
@@ -91,7 +93,7 @@ export const UsageProgressBars = ({ workspace }: Props) => {
           value={chatsPercentage}
           rounded="full"
           isIndeterminate={isLoading}
-          colorScheme={"blue"}
+          colorScheme="orange"
         />
       </Stack>
     </Stack>

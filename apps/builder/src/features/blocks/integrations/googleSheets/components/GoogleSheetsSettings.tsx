@@ -55,6 +55,7 @@ export const GoogleSheetsSettings = ({
   const { sheets, isLoading } = useSheets({
     credentialsId: options?.credentialsId,
     spreadsheetId: options?.spreadsheetId,
+    workspaceId: workspace?.id,
   });
   const { isOpen, onOpen, onClose } = useDisclosure();
   const sheet = useMemo(
@@ -89,7 +90,7 @@ export const GoogleSheetsSettings = ({
       {workspace && (
         <CredentialsDropdown
           type="google sheets"
-          workspaceId={workspace.id}
+          scope={{ type: "workspace", workspaceId: workspace.id }}
           currentCredentialsId={options?.credentialsId}
           onCredentialsSelect={handleCredentialsIdChange}
           onCreateNewClick={handleCreateNewClick}

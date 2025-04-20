@@ -6,11 +6,12 @@ import {
   embedBaseUrls,
   embeddableVideoTypes,
 } from "@typebot.io/blocks-bubbles/video/constants";
+import { parseQueryParams } from "@typebot.io/blocks-bubbles/video/helpers";
 import type {
   EmbeddableVideoBubbleContentType,
   VideoBubbleBlock,
 } from "@typebot.io/blocks-bubbles/video/schema";
-import { clsx } from "clsx";
+import { cx } from "@typebot.io/ui/lib/cva";
 import { Match, Switch, createSignal, onCleanup, onMount } from "solid-js";
 
 type Props = {
@@ -50,7 +51,7 @@ export const VideoBubble = (props: Props) => {
 
   return (
     <div
-      class={clsx(
+      class={cx(
         "flex flex-col w-full",
         props.onTransitionEnd ? "animate-fade-in" : undefined,
       )}
@@ -110,7 +111,7 @@ export const VideoBubble = (props: Props) => {
               }
             >
               <div
-                class={clsx(
+                class={cx(
                   "p-4 z-10 text-fade-in w-full",
                   isTyping() ? "opacity-0" : "opacity-100 p-4",
                 )}
@@ -137,7 +138,8 @@ export const VideoBubble = (props: Props) => {
                       props.content?.type as EmbeddableVideoBubbleContentType
                     ]
                   }/${props.content?.id ?? ""}${
-                    props.content?.queryParamsStr ?? ""
+                    props.content?.queryParamsStr ??
+                    `?${parseQueryParams(props.content)}`
                   }`}
                   class={"w-full h-full"}
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"

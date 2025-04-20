@@ -6,6 +6,7 @@ import { AvatarSideContainer } from "./AvatarSideContainer";
 
 type Props = {
   theme: Theme;
+  avatarSrc: string | undefined;
 };
 
 export const LoadingChunk = (props: Props) => (
@@ -19,7 +20,8 @@ export const LoadingChunk = (props: Props) => (
           }
         >
           <AvatarSideContainer
-            hostAvatarSrc={props.theme.chat?.hostAvatar?.url}
+            theme={props.theme}
+            avatarSrc={props.avatarSrc}
           />
         </Show>
         <LoadingBubble />
